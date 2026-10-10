@@ -1,5 +1,4 @@
-// Deriv helper: runs on Render. Keeps your token on the server and returns a
-// one-time trading WebSocket URL to your toolkit. Demo accounts only unless ALLOW_REAL=1.
+
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
