@@ -27,10 +27,21 @@ const info = (a) => {
     a.is_virtual === 1 || a.is_virtual === true || /^(DOT|VRT)/i.test(id);
   return { id, demo, currency: a.currency || 'USD', balance: a.balance };
 };
+const getAccounts = async () => {
+  const r = await fetch(`${API}/accounts`, { headers: H });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) return { err: (j.errors && j.errors[0] && j.errors[0].message) || `Deriv said HTTP ${r.status}`, code: 502 };
+  const list = Array.isArray(j.data) ? j.data : (j.data && (j.data.accounts || j.data.items)) || [];
+  const accounts = list.map(info).filter((a) => a.id);
+  if (!accounts.length) return { err: 'Could not read accounts', raw: JSON.stringify(j).slice(0, 200), code: 502 };
+  return { accounts };
+};
 
 http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') return send(res, 204, {});
-  if (req.url === '/app' || req.url === '/app/') {
+  const u = new URL(req.url, 'http://local');
+  const route = u.pathname.replace(/\/$/, '') || '/';
+  if (route === '/app') {
     try {
       const page = fs.readFileSync(path.join(__dirname, 'index.html'));
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -39,19 +50,17 @@ http.createServer(async (req, res) => {
       return send(res, 404, { error: 'index.html not found in the repository' });
     }
   }
-  if (!req.url.startsWith('/otp')) return send(res, 200, { ok: true, service: 'deriv-helper' });
+  if (route !== '/otp' && route !== '/accounts') return send(res, 200, { ok: true, service: 'deriv-helper' });
   if (!PROXY_KEY || clean(req.headers['x-key']) !== PROXY_KEY) return send(res, 401, { error: 'Wrong passcode' });
   if (!DERIV_TOKEN || !DERIV_APP_ID) return send(res, 500, { error: 'Helper is missing DERIV_TOKEN or DERIV_APP_ID' });
   try {
-    const lr = await fetch(`${API}/accounts`, { headers: H });
-    const lj = await lr.json().catch(() => ({}));
-    if (!lr.ok) return send(res, 502, { error: (lj.errors && lj.errors[0] && lj.errors[0].message) || `Deriv said HTTP ${lr.status}` });
-    const list = Array.isArray(lj.data) ? lj.data : (lj.data && (lj.data.accounts || lj.data.items)) || [];
-    const accounts = list.map(info).filter((a) => a.id);
-    if (!accounts.length) return send(res, 502, { error: 'Could not read accounts', raw: JSON.stringify(lj).slice(0, 200) });
-    const pick = ACCOUNT_ID ? accounts.find((a) => a.id === ACCOUNT_ID) : accounts.find((a) => a.demo);
-    if (!pick) return send(res, 404, { error: 'No matching demo account found' });
-    if (!pick.demo && ALLOW_REAL !== '1') return send(res, 403, { error: 'Real accounts are blocked. Set ALLOW_REAL=1 to allow.' });
+    const got = await getAccounts();
+    if (got.err) return send(res, got.code, { error: got.err, raw: got.raw });
+    if (route === '/accounts') return send(res, 200, { accounts: got.accounts, realAllowed: ALLOW_REAL === '1' });
+    const want = clean(u.searchParams.get('account')) || ACCOUNT_ID;
+    const pick = want ? got.accounts.find((a) => a.id === want) : got.accounts.find((a) => a.demo);
+    if (!pick) return send(res, 404, { error: 'No matching account found' });
+    if (!pick.demo && ALLOW_REAL !== '1') return send(res, 403, { error: 'Real accounts are blocked. Set ALLOW_REAL=1 on Render to allow.' });
     const or = await fetch(`${API}/accounts/${encodeURIComponent(pick.id)}/otp`, { method: 'POST', headers: H });
     const oj = await or.json().catch(() => ({}));
     const url = oj.data && oj.data.url;
