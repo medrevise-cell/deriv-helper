@@ -1,7 +1,13 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const { DERIV_TOKEN, DERIV_APP_ID, PROXY_KEY, ACCOUNT_ID, ALLOW_REAL } = process.env;
+// Strip invisible characters (copy/paste can add them) from all settings.
+const clean = (v) => String(v || '').replace(/[^\x20-\x7E]/g, '').trim();
+const DERIV_TOKEN = clean(process.env.DERIV_TOKEN);
+const DERIV_APP_ID = clean(process.env.DERIV_APP_ID);
+const PROXY_KEY = clean(process.env.PROXY_KEY);
+const ACCOUNT_ID = clean(process.env.ACCOUNT_ID);
+const ALLOW_REAL = clean(process.env.ALLOW_REAL);
 const PORT = process.env.PORT || 3000;
 const API = 'https://api.derivws.com/trading/v1/options';
 const H = { Authorization: `Bearer ${DERIV_TOKEN}`, 'Deriv-App-ID': DERIV_APP_ID };
@@ -34,7 +40,7 @@ http.createServer(async (req, res) => {
     }
   }
   if (!req.url.startsWith('/otp')) return send(res, 200, { ok: true, service: 'deriv-helper' });
-  if (!PROXY_KEY || req.headers['x-key'] !== PROXY_KEY) return send(res, 401, { error: 'Wrong passcode' });
+  if (!PROXY_KEY || clean(req.headers['x-key']) !== PROXY_KEY) return send(res, 401, { error: 'Wrong passcode' });
   if (!DERIV_TOKEN || !DERIV_APP_ID) return send(res, 500, { error: 'Helper is missing DERIV_TOKEN or DERIV_APP_ID' });
   try {
     const lr = await fetch(`${API}/accounts`, { headers: H });
