@@ -2,6 +2,44 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const zlib = require('zlib');
+// ---- app icon (PNG drawn in code), manifest and service worker so Chrome can install the toolkit as an app ----
+const crcT = (() => { const t = []; for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+const crc = (b) => { let c = 0xffffffff; for (const x of b) c = crcT[(c ^ x) & 255] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+const chunk = (type, data) => {
+  const len = Buffer.alloc(4); len.writeUInt32BE(data.length);
+  const body = Buffer.concat([Buffer.from(type), data]);
+  const sum = Buffer.alloc(4); sum.writeUInt32BE(crc(body));
+  return Buffer.concat([len, body, sum]);
+};
+const makeIcon = (size) => {
+  const row = size * 4 + 1, raw = Buffer.alloc(row * size);
+  const bars = [[0.2, 0.5], [0.44, 0.34], [0.68, 0.2]];   // x start and top of each bar
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    const u = x / size, v = y / size;
+    const white = v <= 0.78 && bars.some(([bx, top]) => u >= bx && u <= bx + 0.12 && v >= top);
+    const o = y * row + 1 + x * 4;
+    raw[o] = white ? 255 : 16; raw[o + 1] = white ? 255 : 58; raw[o + 2] = white ? 255 : 166; raw[o + 3] = 255;
+  }
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(size, 0); ihdr.writeUInt32BE(size, 4); ihdr[8] = 8; ihdr[9] = 6;
+  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
+};
+const ICON192 = makeIcon(192), ICON512 = makeIcon(512);
+const MANIFEST = JSON.stringify({
+  name: 'Deriv Toolkit', short_name: 'Toolkit', start_url: '/', scope: '/', display: 'standalone',
+  background_color: '#101820', theme_color: '#0a0f3a',
+  icons: [
+    { src: '/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any maskable' },
+    { src: '/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any maskable' },
+  ],
+});
+const SW = `self.addEventListener('install',e=>self.skipWaiting());
+self.addEventListener('activate',e=>e.waitUntil(clients.claim()));
+self.addEventListener('fetch',e=>{
+  const u=new URL(e.request.url);
+  if(e.request.method!=='GET'||(u.pathname!=='/'&&u.pathname!=='/app'))return;
+  e.respondWith(fetch(e.request).then(r=>{const c=r.clone();caches.open('toolkit').then(x=>x.put('/',c));return r}).catch(()=>caches.match('/')));
+});`;
 // Strip invisible characters (copy/paste can add them) from all settings.
 const clean = (v) => String(v || '').replace(/[^\x20-\x7E]/g, '').trim();
 const DERIV_TOKEN = clean(process.env.DERIV_TOKEN);
@@ -75,6 +113,9 @@ http.createServer(async (req, res) => {
   const route = u.pathname.replace(/\/$/, '') || '/';
   const host = req.headers.host || 'localhost';
   if (route === '/' || route === '/app') return servePage(res);
+  if (route === '/manifest.webmanifest') return text(res, 200, 'application/manifest+json', MANIFEST);
+  if (route === '/sw.js') { res.writeHead(200, { 'Content-Type': 'text/javascript', 'Service-Worker-Allowed': '/', 'Cache-Control': 'no-cache' }); return res.end(SW); }
+  if (route === '/icon-192.png' || route === '/icon-512.png') { res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=86400' }); return res.end(route.includes('192') ? ICON192 : ICON512); }
   if (route === '/health') return send(res, 200, { ok: true, service: 'deriv-helper' });
   if (route === '/robots.txt')
     return text(res, 200, 'text/plain', `User-agent: *\nAllow: /\nDisallow: /otp\nDisallow: /accounts\nSitemap: https://${host}/sitemap.xml\n`);
@@ -105,3 +146,4 @@ http.createServer(async (req, res) => {
     return send(res, 500, { error: String(e.message || e) });
   }
 }).listen(PORT, () => console.log('deriv-helper listening on', PORT));
+    
