@@ -146,4 +146,3 @@ http.createServer(async (req, res) => {
     return send(res, 500, { error: String(e.message || e) });
   }
 }).listen(PORT, () => console.log('deriv-helper listening on', PORT));
-    
