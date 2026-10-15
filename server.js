@@ -48,19 +48,21 @@ const PROXY_KEY = clean(process.env.PROXY_KEY);
 const ACCOUNT_ID = clean(process.env.ACCOUNT_ID);
 const ALLOW_REAL = clean(process.env.ALLOW_REAL);
 const PORT = process.env.PORT || 3000;
-const API = 'https://api.derivws.com/trading/v1/options';
+const API = clean(process.env.DERIV_API_BASE) || 'https://api.derivws.com/trading/v1/options';
 const H = { Authorization: `Bearer ${DERIV_TOKEN}`, 'Deriv-App-ID': DERIV_APP_ID };
+const SEC = { 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'DENY' };
+const CSP = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' https: wss:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
 const cors = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'x-key',
   'Access-Control-Allow-Methods': 'GET,OPTIONS',
 };
 const send = (res, code, obj) => {
-  res.writeHead(code, { ...cors, 'Content-Type': 'application/json' });
+  res.writeHead(code, { ...cors, ...SEC, 'Content-Type': 'application/json' });
   res.end(JSON.stringify(obj));
 };
 const text = (res, code, type, body) => {
-  res.writeHead(code, { 'Content-Type': type });
+  res.writeHead(code, { ...SEC, 'Content-Type': type });
   res.end(body);
 };
 const same = (a, b) => {
@@ -69,14 +71,18 @@ const same = (a, b) => {
 };
 // Slow down passcode guessing: 10 wrong tries per 10 minutes per visitor.
 const fails = new Map();
-const who = (req) => String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+// The visitor can fake the first X-Forwarded-For entry, so use the last one (added by the hosting proxy).
+const who = (req) => String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',').pop().trim();
+// Plus a global limit that header tricks cannot get around: 30 wrong passcodes in 10 minutes from anyone.
+let gfails = { n: 0, t: 0 };
 const blocked = (ip) => {
   const f = fails.get(ip);
-  return f && f.n >= 10 && Date.now() - f.t < 600000;
+  return (f && f.n >= 10 && Date.now() - f.t < 600000) || (gfails.n >= 30 && Date.now() - gfails.t < 600000);
 };
 const fail = (ip) => {
   const f = fails.get(ip);
   fails.set(ip, f && Date.now() - f.t < 600000 ? { n: f.n + 1, t: f.t } : { n: 1, t: Date.now() });
+  gfails = Date.now() - gfails.t < 600000 ? { n: gfails.n + 1, t: gfails.t } : { n: 1, t: Date.now() };
 };
 const info = (a) => {
   const id = String(a.account_id || a.id || a.loginid || a.accountId || '');
@@ -101,7 +107,8 @@ const servePage = (res) => {
       .filter((f) => /^toolkit-v\d+\.html$/.test(f))
       .sort((x, y) => parseInt(y.slice(9)) - parseInt(x.slice(9)));
     const page = fs.readFileSync(path.join(__dirname, versions[0] || 'index.html'));
-    text(res, 200, 'text/html; charset=utf-8', page);
+    res.writeHead(200, { ...SEC, 'Content-Security-Policy': CSP, 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(page);
   } catch (e) {
     send(res, 404, { error: 'No toolkit-vN.html or index.html found in the repository' });
   }
@@ -114,8 +121,8 @@ http.createServer(async (req, res) => {
   const host = req.headers.host || 'localhost';
   if (route === '/' || route === '/app') return servePage(res);
   if (route === '/manifest.webmanifest') return text(res, 200, 'application/manifest+json', MANIFEST);
-  if (route === '/sw.js') { res.writeHead(200, { 'Content-Type': 'text/javascript', 'Service-Worker-Allowed': '/', 'Cache-Control': 'no-cache' }); return res.end(SW); }
-  if (route === '/icon-192.png' || route === '/icon-512.png') { res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=86400' }); return res.end(route.includes('192') ? ICON192 : ICON512); }
+  if (route === '/sw.js') { res.writeHead(200, { ...SEC, 'Content-Type': 'text/javascript', 'Service-Worker-Allowed': '/', 'Cache-Control': 'no-cache' }); return res.end(SW); }
+  if (route === '/icon-192.png' || route === '/icon-512.png') { res.writeHead(200, { ...SEC, 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=86400' }); return res.end(route.includes('192') ? ICON192 : ICON512); }
   if (route === '/health') return send(res, 200, { ok: true, service: 'deriv-helper' });
   if (route === '/robots.txt')
     return text(res, 200, 'text/plain', `User-agent: *\nAllow: /\nDisallow: /otp\nDisallow: /accounts\nSitemap: https://${host}/sitemap.xml\n`);
@@ -124,7 +131,8 @@ http.createServer(async (req, res) => {
   if (route !== '/otp' && route !== '/accounts') return send(res, 404, { error: 'Not found' });
   const ip = who(req);
   if (blocked(ip)) return send(res, 429, { error: 'Too many wrong passcodes. Try again in 10 minutes.' });
-  if (!PROXY_KEY || !same(clean(req.headers['x-key']), PROXY_KEY)) {
+  if (PROXY_KEY.length < 10) return send(res, 500, { error: 'PROXY_KEY on Render is too short. Use at least 10 characters.' });
+  if (!same(clean(req.headers['x-key']), PROXY_KEY)) {
     fail(ip);
     return send(res, 401, { error: 'Wrong passcode' });
   }
